@@ -526,5 +526,3 @@ eas submit --platform all
 **MessageAI** - Where Intelligent Conversation Meets Real-Time Messaging 🚀
 
 *Built in 7 days for Gauntlet AI Cohort 3*
-#   G a u n t l e t - P r o j e c t - T h r e e  
- 

@@ -5,10 +5,15 @@
 
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import { VideoMetadata } from '../shared/types';
 
-// Set FFmpeg path from the installer
+// Set FFmpeg and FFprobe paths from the installers
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+ffmpeg.setFfprobePath(ffprobeInstaller.path);
+
+console.log('FFmpeg path:', ffmpegInstaller.path);
+console.log('FFprobe path:', ffprobeInstaller.path);
 
 /**
  * Test if FFmpeg is working correctly
@@ -61,15 +66,28 @@ export async function extractVideoMetadata(videoPath: string): Promise<VideoMeta
         height: videoStream.height || 0,
         size: metadata.format.size || 0,
         format: metadata.format.format_name?.split(',')[0] || 'unknown',
-        fps: videoStream.r_frame_rate ? eval(videoStream.r_frame_rate) : undefined,
+        fps: videoStream.r_frame_rate ? parseFps(videoStream.r_frame_rate) : undefined,
         codec: videoStream.codec_name,
         bitrate: metadata.format.bit_rate,
       };
 
-      console.log('Extracted metadata:', result);
+      console.log('✅ Extracted metadata:', result);
       resolve(result);
     });
   });
+}
+
+/**
+ * Parse frame rate from FFmpeg's fraction format (e.g., "30/1" -> 30)
+ */
+function parseFps(rFrameRate: string): number {
+  const parts = rFrameRate.split('/');
+  if (parts.length === 2) {
+    const num = parseFloat(parts[0]);
+    const den = parseFloat(parts[1]);
+    return den !== 0 ? num / den : 0;
+  }
+  return parseFloat(rFrameRate) || 0;
 }
 
 /**

@@ -17,4 +17,8 @@ export const mainConfig: Configuration = {
   resolve: {
     extensions: ['.js', '.ts', '.jsx', '.tsx', '.css', '.json'],
   },
+  externals: {
+    '@ffprobe-installer/ffprobe': 'commonjs2 @ffprobe-installer/ffprobe',
+    '@ffmpeg-installer/ffmpeg': 'commonjs2 @ffmpeg-installer/ffmpeg',
+  },
 };

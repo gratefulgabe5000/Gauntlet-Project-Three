@@ -11,7 +11,14 @@
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx ."
   },
-  "keywords": ["video", "editor", "electron", "desktop", "recording", "ffmpeg"],
+  "keywords": [
+    "video",
+    "editor",
+    "electron",
+    "desktop",
+    "recording",
+    "ffmpeg"
+  ],
   "author": {
     "name": "GratefulGabe5000",
     "email": "GratefulGabe5000@gmail.com"
@@ -28,6 +35,8 @@
     "@electron-forge/plugin-webpack": "^7.10.2",
     "@electron/fuses": "^1.8.0",
     "@types/fluent-ffmpeg": "^2.1.28",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
     "@typescript-eslint/eslint-plugin": "^5.62.0",
     "@typescript-eslint/parser": "^5.62.0",
     "@vercel/webpack-asset-relocator-loader": "^1.7.3",
@@ -43,7 +52,10 @@
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "electron-squirrel-startup": "^1.0.1",
-    "fluent-ffmpeg": "^2.1.3"
+    "fluent-ffmpeg": "^2.1.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   }
 }

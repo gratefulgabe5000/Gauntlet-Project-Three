@@ -81,39 +81,6 @@
     </style>
   </head>
   <body>
-    <div class="container">
-      <h1>🎬 ClipForge</h1>
-      <p class="tagline">Desktop Video Editor</p>
-      <p>Record → Edit → Export</p>
-      
-      <div class="status">
-        <div class="status-item">
-          <span class="checkmark">✓</span> Electron Framework Ready
-        </div>
-        <div class="status-item">
-          <span class="checkmark">✓</span> TypeScript Compiled
-        </div>
-        <div class="status-item" id="ffmpeg-status">
-          <span class="loading"></span> Testing FFmpeg Integration...
-        </div>
-        <div class="status-item">
-          <span class="checkmark">✓</span> Hot Reload Active
-        </div>
-      </div>
-      
-      <p style="margin-top: 2rem; font-size: 0.9rem; opacity: 0.8;">
-        Phase 0 Setup Complete - Ready for MVP Sprint! 🚀
-      </p>
-    </div>
-    
-    <script>
-      // This will be updated when we have proper IPC
-      setTimeout(() => {
-        const ffmpegStatus = document.getElementById('ffmpeg-status');
-        if (ffmpegStatus) {
-          ffmpegStatus.innerHTML = '<span class="checkmark">✓</span> FFmpeg Integration Verified';
-        }
-      }, 2000);
-    </script>
+    <div id="root"></div>
   </body>
 </html>

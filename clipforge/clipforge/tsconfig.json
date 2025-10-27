@@ -11,6 +11,9 @@
     "outDir": "dist",
     "moduleResolution": "node",
     "resolveJsonModule": true,
+    "jsx": "react",
+    "lib": ["ES6", "DOM"],
+    "typeRoots": ["node_modules/@types", "src/renderer"],
     "paths": {
       "*": ["node_modules/*"]
     }

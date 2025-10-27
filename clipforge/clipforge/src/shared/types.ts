@@ -1,6 +1,6 @@
 /**
- * ClipForge - Shared Type Definitions
- * These types are used across main and renderer processes
+ * ClipForge - Shared TypeScript Types
+ * Type definitions used across main and renderer processes
  */
 
 export interface VideoMetadata {
@@ -35,15 +35,17 @@ export interface TimelineState {
 
 export interface ExportSettings {
   outputPath: string;
-  resolution: '720p' | '1080p' | 'source';
-  format: 'mp4';
-  quality: 'high' | 'medium' | 'low';
+  format: 'mp4' | 'mov' | 'webm';
+  quality: 'low' | 'medium' | 'high';
+  resolution?: {
+    width: number;
+    height: number;
+  };
 }
 
 export interface ExportProgress {
-  percent: number; // 0-100
-  currentFrame: number;
-  totalFrames: number;
-  timeRemaining?: number; // estimated seconds
+  percent: number;
+  currentFile?: string;
+  timeRemaining?: number;
 }
 

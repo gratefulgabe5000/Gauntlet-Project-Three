@@ -6,13 +6,17 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useTimeline } from '../../context/TimelineContext';
 
+// Timeline left offset for visual alignment
+const TIMELINE_LEFT_OFFSET = 20;
+
 export const Timeline: React.FC = () => {
-  const { timelineState, setCurrentTime, setZoom, removeClip } = useTimeline();
+  const { timelineState, setCurrentTime, setZoom, removeClip, splitClipAtTime } = useTimeline();
   const { clips, totalDuration, currentTime, zoom } = timelineState;
   
   const timelineRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
   /**
    * Format time in MM:SS format
@@ -50,7 +54,7 @@ export const Timeline: React.FC = () => {
     if (!timelineRef.current) return;
 
     const rect = timelineRef.current.getBoundingClientRect();
-    const clickX = e.clientX - rect.left - 50; // Subtract left padding
+    const clickX = e.clientX - rect.left - TIMELINE_LEFT_OFFSET; // Subtract left offset
     const clickedTime = Math.max(0, clickX / zoom);
     
     setCurrentTime(Math.min(clickedTime, totalDuration));
@@ -74,7 +78,7 @@ export const Timeline: React.FC = () => {
       if (!timelineRef.current) return;
 
       const rect = timelineRef.current.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left - 50;
+      const mouseX = e.clientX - rect.left - TIMELINE_LEFT_OFFSET;
       const newTime = Math.max(0, Math.min(mouseX / zoom, totalDuration));
       
       setCurrentTime(newTime);
@@ -104,10 +108,35 @@ export const Timeline: React.FC = () => {
   };
 
   /**
-   * Handle zoom controls
+   * Handle zoom controls (finer increments: ±1 px/sec)
    */
-  const handleZoomIn = () => setZoom(zoom + 5);
-  const handleZoomOut = () => setZoom(zoom - 5);
+  const handleZoomIn = () => setZoom(zoom + 1);
+  const handleZoomOut = () => setZoom(zoom - 1);
+
+  /**
+   * Handle split at playhead
+   */
+  const handleSplit = () => {
+    const splitTime = currentTime; // Capture current time
+    const wasSplit = splitClipAtTime(splitTime);
+    if (wasSplit) {
+      console.log('✅ Split successful at time:', splitTime);
+      // Maintain playhead position after split
+      setCurrentTime(splitTime);
+    } else {
+      console.log('❌ No clip to split at playhead position');
+    }
+  };
+
+  /**
+   * Handle mouse wheel zoom
+   */
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault(); // Prevent page scroll
+    
+    const zoomDelta = e.deltaY < 0 ? 1 : -1; // Scroll up = zoom in, down = zoom out
+    setZoom(zoom + zoomDelta);
+  };
 
   return (
     <div style={styles.container}>
@@ -130,6 +159,18 @@ export const Timeline: React.FC = () => {
           >
             ⏮️
           </button>
+
+          {/* Split Button */}
+          <button
+            style={{
+              ...styles.controlButton,
+              backgroundColor: '#dc3545',
+            }}
+            onClick={handleSplit}
+            title="Split clip at playhead (✂️)"
+          >
+            ✂️ Split
+          </button>
           
           {/* Time Display */}
           <span style={styles.timeDisplay}>
@@ -149,20 +190,39 @@ export const Timeline: React.FC = () => {
         </div>
       </div>
 
-      {/* Timeline Canvas */}
-      <div
-        ref={timelineRef}
-        style={styles.timeline}
-        onClick={handleTimelineClick}
+      {/* Timeline Canvas Wrapper - Fixed Width */}
+      <div 
+        style={{
+          width: '100vw', // 100% of viewport width
+          maxWidth: '100vw', // Never exceed viewport
+          height: '180px',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          backgroundColor: '#f8f9fa',
+          position: 'relative' as const,
+        }}
+        onWheel={handleWheel} // Mouse wheel zoom control
       >
+        {/* Timeline Canvas - Content */}
+        <div
+          ref={timelineRef}
+          style={{
+            ...styles.timelineCanvas,
+            // Width: at least wrapper width, max 5x wrapper width for reasonable scrolling
+            width: `${Math.max(
+              window.innerWidth,
+              Math.min(totalDuration * zoom + 100, window.innerWidth * 5)
+            )}px`,
+          }}
+        >
         {/* Time Ruler */}
-        <div style={styles.ruler}>
+        <div style={styles.ruler} onClick={handleTimelineClick}>
           {Array.from({ length: Math.ceil(totalDuration / 10) + 1 }, (_, i) => (
             <div
               key={i}
               style={{
                 ...styles.rulerMark,
-                left: `${i * 10 * zoom + 50}px`,
+                left: `${i * 10 * zoom + TIMELINE_LEFT_OFFSET}px`,
               }}
             >
               <span style={styles.rulerLabel}>{formatTime(i * 10)}</span>
@@ -175,7 +235,8 @@ export const Timeline: React.FC = () => {
           <div style={styles.track}>
             {clips.map((clip) => {
               const clipWidth = clip.duration * zoom;
-              const clipLeft = clip.startTime * zoom + 50;
+              const clipLeft = clip.startTime * zoom + TIMELINE_LEFT_OFFSET;
+              const isSelected = selectedClipId === clip.id;
 
               return (
                 <div
@@ -184,9 +245,15 @@ export const Timeline: React.FC = () => {
                     ...styles.clip,
                     left: `${clipLeft}px`,
                     width: `${clipWidth}px`,
+                    ...(isSelected ? styles.clipSelected : {}),
                   }}
                   title={clip.metadata.filename}
+                  onClick={(e) => {
+                    e.stopPropagation(); // Prevent ruler click
+                    setSelectedClipId(clip.id);
+                  }}
                 >
+                  {/* Clip Content */}
                   <div style={styles.clipHeader}>
                     <span style={styles.clipName}>{clip.metadata.filename}</span>
                     <button
@@ -213,14 +280,16 @@ export const Timeline: React.FC = () => {
         <div
           style={{
             ...styles.playhead,
-            left: `${currentTime * zoom + 50}px`,
+            left: `${currentTime * zoom + TIMELINE_LEFT_OFFSET}px`,
+            cursor: isDraggingPlayhead ? 'grabbing' : 'grab',
           }}
           onMouseDown={handlePlayheadMouseDown}
         >
           <div style={styles.playheadHandle} />
-          <div style={styles.playheadLine} />
+          <div style={styles.playheadLine} onMouseDown={handlePlayheadMouseDown} />
         </div>
-      </div>
+      </div> {/* Close timelineCanvas */}
+      </div> {/* Close wrapper */}
 
       {/* Timeline Info */}
       <div style={styles.info}>
@@ -241,17 +310,19 @@ export const Timeline: React.FC = () => {
  */
 const styles = {
   container: {
-    marginTop: '20px',
+    marginTop: '0', // Remove top margin
     backgroundColor: 'white',
-    borderRadius: '12px',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+    borderRadius: '0', // Remove border radius for full width
+    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
     overflow: 'hidden',
+    width: '100%', // Full window width
+    maxWidth: '100%', // Prevent expansion
   },
   header: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '15px 20px',
+    padding: '15px 15px', // Match contentWrapper padding (15px)
     backgroundColor: '#f8f9fa',
     borderBottom: '2px solid #e9ecef',
   },
@@ -304,12 +375,22 @@ const styles = {
     minWidth: '50px',
     textAlign: 'center' as const,
   },
-  timeline: {
+  timelineWrapper: {
+    width: '100%', // Fixed width - always full screen
+    maxWidth: '100%', // Prevent expansion beyond 100%
+    height: '180px',
+    overflowX: 'auto' as const, // Horizontal scroll
+    overflowY: 'hidden' as const, // No vertical scroll
+    backgroundColor: '#f8f9fa',
+    position: 'relative' as const,
+  },
+  timelineCanvas: {
     position: 'relative' as const,
     height: '180px',
     backgroundColor: '#f8f9fa',
-    overflow: 'auto',
     cursor: 'pointer',
+    padding: '0', // No padding - use offset for alignment instead
+    // Width is set dynamically via inline style based on zoom
   },
   ruler: {
     position: 'relative' as const,
@@ -349,6 +430,51 @@ const styles = {
     cursor: 'grab',
     transition: 'all 0.2s ease',
     overflow: 'hidden',
+  },
+  clipSelected: {
+    border: '3px solid #fbbf24',
+    boxShadow: '0 0 12px rgba(251, 191, 36, 0.5)',
+  },
+  trimHandle: {
+    position: 'absolute' as const,
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: '8px',
+    backgroundColor: 'rgba(251, 191, 36, 0.8)',
+    cursor: 'ew-resize',
+    zIndex: 2,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'background-color 0.2s ease',
+  },
+  trimHandleBar: {
+    color: 'white',
+    fontSize: '10px',
+    fontWeight: 'bold' as const,
+    userSelect: 'none' as const,
+  },
+  trimOverlay: {
+    position: 'absolute' as const,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    pointerEvents: 'none' as const,
+    zIndex: 1,
+  },
+  trimmedRegion: {
+    position: 'absolute' as const,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderLeft: '2px dashed rgba(255, 255, 255, 0.5)',
+    borderRight: '2px dashed rgba(255, 255, 255, 0.5)',
+  },
+  trimIndicator: {
+    fontSize: '10px',
+    opacity: 0.9,
   },
   clipHeader: {
     display: 'flex',
@@ -399,7 +525,7 @@ const styles = {
     height: '12px',
     backgroundColor: '#dc3545',
     borderRadius: '50%',
-    cursor: 'ew-resize',
+    cursor: 'grab',
     pointerEvents: 'auto' as const,
   },
   playheadLine: {
@@ -407,6 +533,8 @@ const styles = {
     height: '100%',
     backgroundColor: '#dc3545',
     marginLeft: '-1px',
+    cursor: 'grab',
+    pointerEvents: 'auto' as const,
   },
   info: {
     padding: '12px 20px',

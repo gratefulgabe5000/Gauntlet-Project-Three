@@ -24,6 +24,7 @@ export interface VideoClip {
   trimStart?: number; // trim from beginning (seconds)
   trimEnd?: number; // trim from end (seconds)
   track: number; // which timeline track (0, 1, 2...)
+  thumbnails?: string[]; // base64 thumbnails for timeline preview
 }
 
 export interface TimelineState {

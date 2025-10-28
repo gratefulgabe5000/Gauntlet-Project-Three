@@ -2,19 +2,23 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { useTimeline } from '../../context/TimelineContext';
+import { VideoMetadata } from '../../../shared/types';
 
 interface VideoPlayerProps {
   onTimeUpdate?: (currentTime: number) => void;
   onDurationChange?: (duration: number) => void;
   onPlaybackStateChange?: (isPlaying: boolean, currentClip: any) => void;
+  onVideoImport?: (filePath: string) => void;
+  draggingVideo?: VideoMetadata | null;
 }
 
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({ onTimeUpdate, onDurationChange, onPlaybackStateChange }) => {
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({ onTimeUpdate, onDurationChange, onPlaybackStateChange, onVideoImport, draggingVideo }) => {
   const { timelineState, setCurrentTime } = useTimeline();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isPlayingRef = useRef(false); // Track playing state to prevent interference
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
 
   // Current clip to display (the clip at current playhead position)
   const currentClip = timelineState.clips.find(
@@ -22,6 +26,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ onTimeUpdate, onDurati
       timelineState.currentTime >= clip.startTime &&
       timelineState.currentTime < clip.startTime + clip.duration
   );
+  
+  // Show drop zone when dragging from sidebar OR when timeline is empty
+  const shouldShowDropZone = (draggingVideo && !currentClip) || (!currentClip && timelineState.clips.length === 0);
 
   // Update ref when isPlaying changes
   useEffect(() => {
@@ -242,8 +249,110 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ onTimeUpdate, onDurati
     }
   };
 
+  /**
+   * Listen for play/pause events from sidebar
+   */
+  useEffect(() => {
+    const handleTogglePlayback = () => {
+      handlePlayPause();
+    };
+
+    const handleRewindToStart = () => {
+      setCurrentTime(0);
+    };
+
+    window.addEventListener('toggle-playback', handleTogglePlayback);
+    window.addEventListener('rewind-to-start', handleRewindToStart);
+    return () => {
+      window.removeEventListener('toggle-playback', handleTogglePlayback);
+      window.removeEventListener('rewind-to-start', handleRewindToStart);
+    };
+  }, [isPlaying, currentClip]); // Include dependencies for handlePlayPause
+
+  /**
+   * Handle drag over
+   */
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(true);
+  };
+
+  /**
+   * Handle drag leave
+   */
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  /**
+   * Handle drop
+   */
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+
+    // Check if dropping from sidebar (video metadata)
+    if (draggingVideo) {
+      if (onVideoImport) {
+        console.log('✅ Sidebar video dropped on player:', draggingVideo.path);
+        onVideoImport(draggingVideo.path);
+      }
+      return;
+    }
+
+    // Handle file drop from file system
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const file = files[0];
+    const validExtensions = ['mp4', 'mov', 'avi', 'm4v', 'mkv', 'webm'];
+    const fileExt = file.name.split('.').pop()?.toLowerCase();
+
+    if (!fileExt || !validExtensions.includes(fileExt)) {
+      console.error('❌ Invalid file type:', fileExt);
+      return;
+    }
+
+    try {
+      const filePath = await window.electron?.getFilePath(file);
+      if (filePath && onVideoImport) {
+        console.log('✅ Video dropped:', filePath);
+        onVideoImport(filePath);
+      } else {
+        console.error('❌ Could not access file path');
+      }
+    } catch (error) {
+      console.error('❌ Drop error:', error);
+    }
+  };
+
+  /**
+   * Handle click to open file dialog
+   */
+  const handleClickToImport = async () => {
+    if (!onVideoImport) return;
+    
+    try {
+      const filePath = await window.electron?.openFileDialog();
+      if (filePath) {
+        onVideoImport(filePath);
+      }
+    } catch (error) {
+      console.error('❌ File dialog error:', error);
+    }
+  };
+
   return (
-    <div style={styles.container}>
+    <div 
+      style={styles.container}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div style={styles.videoWrapper}>
         {currentClip ? (
           <>
@@ -260,31 +369,45 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ onTimeUpdate, onDurati
                 <p>❌ {error}</p>
               </div>
             )}
-            {/* Play button overlay on video */}
-            <div style={styles.playOverlay}>
-              <button
-                style={styles.playButton}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  console.log('🖱️ Play button clicked!');
-                  handlePlayPause();
-                }}
-                title={isPlaying ? 'Pause' : 'Play'}
-              >
-                {isPlaying ? '⏸️' : '▶️'}
-              </button>
-            </div>
           </>
         ) : (
-          <div style={styles.placeholder}>
-            <div style={styles.placeholderContent}>
-              <p style={styles.placeholderIcon}>🎬</p>
-              <p style={styles.placeholderText}>
-                {timelineState.clips.length === 0
-                  ? 'Import a video to start editing'
-                  : 'Move the playhead to a clip on the timeline'}
-              </p>
-            </div>
+          // Show import UI when no clips or not on a clip
+          <div 
+            style={{
+              ...styles.placeholder,
+              ...(isDraggingOver ? styles.placeholderDragging : {}),
+            }}
+          >
+            {shouldShowDropZone ? (
+              // Show full import UI when timeline is empty OR dragging from sidebar
+              <div style={styles.dropZone} onClick={!draggingVideo ? handleClickToImport : undefined}>
+                <div style={styles.dropZoneContent}>
+                  <p style={styles.dropZoneIcon}>🎬</p>
+                  <p style={styles.dropZoneTitle}>
+                    {isDraggingOver || draggingVideo ? 'Drop video here!' : 'Drag & Drop Video Here'}
+                  </p>
+                  {!draggingVideo && (
+                    <>
+                      <p style={styles.dropZoneSubtitle}>or</p>
+                      <button style={styles.dropZoneButton} onClick={handleClickToImport}>
+                        Choose Video File
+                      </button>
+                      <p style={styles.dropZoneFormats}>
+                        Supports: MP4, MOV, AVI, M4V, MKV, WebM
+                      </p>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : (
+              // Show simple placeholder when clips exist but not on one
+              <div style={styles.placeholderContent}>
+                <p style={styles.placeholderIcon}>🎬</p>
+                <p style={styles.placeholderText}>
+                  Move the playhead to a clip on the timeline
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -298,20 +421,20 @@ const styles = {
     flexDirection: 'column' as const,
     width: '100%',
     height: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: '20px',
     backgroundColor: '#1a1a1a',
+    padding: '20px',
   },
   videoWrapper: {
     position: 'relative' as const,
     width: '100%',
-    maxWidth: '1200px',
-    aspectRatio: '16 / 9',
+    height: '100%',
     backgroundColor: '#000',
     borderRadius: '8px',
     overflow: 'hidden',
     boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   video: {
     width: '100%',
@@ -325,6 +448,11 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
     background: 'linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%)',
+    transition: 'all 0.3s ease',
+  },
+  placeholderDragging: {
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    border: '3px dashed rgba(255, 255, 255, 0.5)',
   },
   placeholderContent: {
     textAlign: 'center' as const,
@@ -338,6 +466,54 @@ const styles = {
     fontSize: '16px',
     margin: 0,
   },
+  dropZone: {
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    transition: 'all 0.3s ease',
+  },
+  dropZoneContent: {
+    textAlign: 'center' as const,
+  },
+  dropZoneIcon: {
+    fontSize: '80px',
+    margin: '0 0 20px 0',
+    animation: 'pulse 2s ease-in-out infinite',
+  },
+  dropZoneTitle: {
+    fontSize: '24px',
+    fontWeight: 'bold' as const,
+    color: '#fff',
+    margin: '0 0 10px 0',
+  },
+  dropZoneSubtitle: {
+    fontSize: '16px',
+    color: 'rgba(255, 255, 255, 0.7)',
+    margin: '0 0 20px 0',
+  },
+  dropZoneButton: {
+    fontSize: '16px',
+    padding: '12px 30px',
+    backgroundColor: '#667eea',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontWeight: 'bold' as const,
+    transition: 'all 0.2s ease',
+    boxShadow: '0 4px 8px rgba(0, 0, 0, 0.2)',
+    marginBottom: '20px',
+  },
+  dropZoneFormats: {
+    fontSize: '12px',
+    color: 'rgba(255, 255, 255, 0.5)',
+    margin: 0,
+    marginTop: '150px',
+  },
   error: {
     position: 'absolute' as const,
     top: '50%',
@@ -349,24 +525,6 @@ const styles = {
     borderRadius: '8px',
     fontSize: '14px',
     fontWeight: 'bold' as const,
-  },
-  playOverlay: {
-    position: 'absolute' as const,
-    bottom: '20px',
-    left: '20px',
-    zIndex: 10,
-  },
-  playButton: {
-    fontSize: '32px',
-    padding: '15px 25px',
-    border: 'none',
-    borderRadius: '12px',
-    cursor: 'pointer',
-    backgroundColor: 'rgba(102, 126, 234, 0.9)',
-    color: 'white',
-    transition: 'all 0.2s ease',
-    fontWeight: 'bold' as const,
-    boxShadow: '0 4px 8px rgba(0, 0, 0, 0.3)',
   },
 };
 

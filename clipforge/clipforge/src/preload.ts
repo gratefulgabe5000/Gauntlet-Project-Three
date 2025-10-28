@@ -30,6 +30,16 @@ contextBridge.exposeInMainWorld('electron', {
     return ipcRenderer.invoke('extract-metadata', filePath);
   },
   
+  // Generate single thumbnail
+  generateThumbnail: (filePath: string, timeInSeconds: number = 0) => {
+    return ipcRenderer.invoke('generate-thumbnail', filePath, timeInSeconds);
+  },
+  
+  // Generate multiple thumbnails for timeline
+  generateThumbnails: (filePath: string, count: number, duration: number) => {
+    return ipcRenderer.invoke('generate-thumbnails', filePath, count, duration);
+  },
+  
   // Listen for FFmpeg status
   onFFmpegStatus: (callback: (status: any) => void) => {
     ipcRenderer.on('ffmpeg-status', (_event, status) => callback(status));

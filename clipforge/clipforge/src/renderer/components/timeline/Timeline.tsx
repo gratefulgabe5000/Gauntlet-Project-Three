@@ -5,16 +5,20 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { useTimeline } from '../../context/TimelineContext';
+import { VideoMetadata } from '../../../shared/types';
 
 // Timeline left offset for visual alignment
 const TIMELINE_LEFT_OFFSET = 20;
 
 interface TimelineProps {
   onImportVideo?: () => void;
+  onToggleCollapse?: () => void;
+  onFullscreen?: () => void;
+  draggingVideo?: VideoMetadata | null;
 }
 
-export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
-  const { timelineState, setCurrentTime, setZoom, removeClip, splitClipAtTime } = useTimeline();
+export const Timeline: React.FC<TimelineProps> = ({ onImportVideo, onToggleCollapse, onFullscreen, draggingVideo }) => {
+  const { timelineState, setCurrentTime, setZoom, removeClip, splitClipAtTime, reorderClips, addClipToTimeline } = useTimeline();
   const { clips, totalDuration, currentTime, zoom } = timelineState;
   
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -24,6 +28,17 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [mouseTimelineX, setMouseTimelineX] = useState<number | null>(null); // Track mouse X for zoom
+  const [draggingClipId, setDraggingClipId] = useState<string | null>(null);
+  const [dragStartX, setDragStartX] = useState<number>(0);
+  const [dragStartTime, setDragStartTime] = useState<number>(0);
+  const [, setWindowWidth] = useState(window.innerWidth); // Force re-render on resize
+  const [dropIndicatorIndex, setDropIndicatorIndex] = useState<number | null>(null);
+  const [ghostPosition, setGhostPosition] = useState<{ x: number; y: number } | null>(null);
+  const [hasDragMoved, setHasDragMoved] = useState(false); // Track if drag actually moved
+  const [sidebarDropIndicatorIndex, setSidebarDropIndicatorIndex] = useState<number | null>(null);
+  const [isDraggingOverTimeline, setIsDraggingOverTimeline] = useState(false);
+  const [showZoomLabel, setShowZoomLabel] = useState(false);
+  const zoomLabelTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   /**
    * Format time in MM:SS format
@@ -42,6 +57,41 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
     // Timeline only manages playhead position for scrubbing
     return;
   }, [isPlaying, totalDuration, currentTime, setCurrentTime]);
+
+  /**
+   * Handle keyboard events (Delete/Backspace for selected clips)
+   */
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Delete or Backspace key
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId) {
+        // Prevent default backspace navigation
+        e.preventDefault();
+        console.log('🗑️ Deleting selected clip:', selectedClipId);
+        removeClip(selectedClipId);
+        setSelectedClipId(null);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectedClipId, removeClip]);
+
+  /**
+   * Handle window resize to update timeline width
+   */
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowWidth(window.innerWidth);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
 
   /**
    * Handle timeline click to set playhead position
@@ -104,22 +154,41 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
   /**
    * Handle zoom controls with cursor-based centering
    */
+  const handleZoomChange = (newZoom: number) => {
+    setZoom(newZoom);
+    setShowZoomLabel(true);
+    
+    // Clear existing timeout
+    if (zoomLabelTimeoutRef.current) {
+      clearTimeout(zoomLabelTimeoutRef.current);
+    }
+    
+    // Hide label after 3 seconds
+    zoomLabelTimeoutRef.current = setTimeout(() => {
+      setShowZoomLabel(false);
+    }, 3000);
+  };
+
   const handleZoomIn = () => {
     if (!timelineWrapperRef.current || !timelineRef.current) {
-      setZoom(zoom + 1);
+      handleZoomChange(Math.min(zoom + 1, 30));
       return;
     }
 
-    zoomTowardsCursor(zoom + 1);
+    const newZoom = Math.min(zoom + 1, 30);
+    zoomTowardsCursor(newZoom);
+    handleZoomChange(newZoom);
   };
 
   const handleZoomOut = () => {
     if (!timelineWrapperRef.current || !timelineRef.current) {
-      setZoom(zoom - 1);
+      handleZoomChange(Math.max(zoom - 1, 1));
       return;
     }
 
-    zoomTowardsCursor(zoom - 1);
+    const newZoom = Math.max(zoom - 1, 1);
+    zoomTowardsCursor(newZoom);
+    handleZoomChange(newZoom);
   };
 
   /**
@@ -166,6 +235,123 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
   };
 
   /**
+   * Handle clip drag start
+   */
+  const handleClipDragStart = (e: React.MouseEvent, clipId: string) => {
+    // Only allow drag from clip body, not from buttons
+    if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+    
+    e.stopPropagation();
+    setDraggingClipId(clipId);
+    setDragStartX(e.clientX);
+    setHasDragMoved(false); // Reset drag moved flag
+    
+    const clip = clips.find(c => c.id === clipId);
+    if (clip) {
+      setDragStartTime(clip.startTime);
+    }
+    
+    console.log('🖐️ Started dragging clip:', clipId);
+  };
+
+  /**
+   * Handle clip dragging
+   */
+  useEffect(() => {
+    if (!draggingClipId) {
+      setDropIndicatorIndex(null);
+      setGhostPosition(null);
+      return;
+    }
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!timelineRef.current) return;
+
+      const deltaX = e.clientX - dragStartX;
+      
+      // Only consider it a drag if moved more than 5 pixels
+      if (Math.abs(deltaX) > 5) {
+        setHasDragMoved(true);
+      }
+
+      // Update ghost position to follow cursor
+      const rect = timelineRef.current.getBoundingClientRect();
+      setGhostPosition({ x: e.clientX, y: e.clientY });
+
+      const deltaTime = deltaX / zoom;
+      
+      // Find which clip position we're hovering over
+      const hoverTime = dragStartTime + deltaTime;
+      let targetIndex = 0;
+      
+      for (let i = 0; i < clips.length; i++) {
+        if (hoverTime >= clips[i].startTime + clips[i].duration / 2) {
+          targetIndex = i + 1;
+        }
+      }
+      
+      // Update drop indicator position
+      targetIndex = Math.max(0, Math.min(targetIndex, clips.length));
+      setDropIndicatorIndex(targetIndex);
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!timelineRef.current) return;
+
+      // Only reorder and move playhead if the clip was actually dragged
+      if (!hasDragMoved) {
+        console.log('🖱️ Click detected (no drag movement), not reordering');
+        setDraggingClipId(null);
+        setDropIndicatorIndex(null);
+        setGhostPosition(null);
+        return;
+      }
+
+      const deltaX = e.clientX - dragStartX;
+      const deltaTime = deltaX / zoom;
+      const hoverTime = dragStartTime + deltaTime;
+      
+      // Find target index based on where we dropped
+      let targetIndex = 0;
+      for (let i = 0; i < clips.length; i++) {
+        if (hoverTime >= clips[i].startTime + clips[i].duration / 2) {
+          targetIndex = i + 1;
+        }
+      }
+      
+      // Don't exceed bounds
+      targetIndex = Math.max(0, Math.min(targetIndex, clips.length - 1));
+      
+      console.log('📍 Dropping clip at index:', targetIndex);
+      reorderClips(draggingClipId, targetIndex);
+      
+      // Calculate new start time for the reordered clip
+      // After reordering, clips are sequential, so we sum up durations before this index
+      let newStartTime = 0;
+      for (let i = 0; i < targetIndex; i++) {
+        if (clips[i].id !== draggingClipId) {
+          newStartTime += clips[i].duration;
+        }
+      }
+      
+      // Set playhead to the start of the reordered clip
+      setCurrentTime(newStartTime);
+      
+      setDraggingClipId(null);
+      setDropIndicatorIndex(null);
+      setGhostPosition(null);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [draggingClipId, dragStartX, dragStartTime, zoom, clips, reorderClips, hasDragMoved, setCurrentTime]);
+
+  /**
    * Handle mouse wheel zoom - only when over timeline
    */
   const handleWheel = (e: React.WheelEvent) => {
@@ -177,15 +363,20 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
   };
 
   /**
-   * Attach native wheel event listener to prevent default scroll behavior
-   * and zoom towards cursor position
+   * Attach native wheel event listener - require Ctrl for zoom
    */
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const handleNativeWheel = (e: WheelEvent) => {
-      e.preventDefault(); // Block page scroll
+      // Only zoom if Ctrl key is held
+      if (!e.ctrlKey) {
+        return; // Allow normal page scrolling
+      }
+
+      e.preventDefault(); // Block page scroll when zooming
+      e.stopPropagation();
       
       // Track mouse position for zoom centering
       if (timelineWrapperRef.current) {
@@ -194,7 +385,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
       }
       
       const zoomDelta = e.deltaY < 0 ? 1 : -1;
-      const newZoom = Math.max(0.5, Math.min(zoom + zoomDelta, 30));
+      const newZoom = Math.max(1, Math.min(zoom + zoomDelta, 30));
       
       // Use zoom towards cursor
       if (timelineWrapperRef.current && timelineRef.current) {
@@ -202,6 +393,9 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
       } else {
         setZoom(newZoom);
       }
+      
+      // Show zoom label (same as buttons/slider)
+      handleZoomChange(newZoom);
     };
 
     // Use native event with { passive: false } to allow preventDefault
@@ -210,68 +404,164 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
     return () => {
       container.removeEventListener('wheel', handleNativeWheel);
     };
-  }, [zoom, setZoom]);
+  }, [zoom, setZoom, mouseTimelineX]);
+
+  /**
+   * Handle drag over timeline (for sidebar videos)
+   */
+  const handleTimelineDragOver = (e: React.DragEvent) => {
+    if (!draggingVideo) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOverTimeline(true);
+    
+    // Calculate drop position
+    const rect = timelineRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    
+    const mouseX = e.clientX - rect.left - TIMELINE_LEFT_OFFSET;
+    const hoverTime = Math.max(0, mouseX / zoom);
+    
+    // Find which index to insert at
+    let targetIndex = clips.length; // Default to end
+    for (let i = 0; i < clips.length; i++) {
+      if (hoverTime < clips[i].startTime + clips[i].duration / 2) {
+        targetIndex = i;
+        break;
+      }
+    }
+    
+    setSidebarDropIndicatorIndex(targetIndex);
+  };
+
+  /**
+   * Handle drag leave timeline
+   */
+  const handleTimelineDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingOverTimeline(false);
+    setSidebarDropIndicatorIndex(null);
+  };
+
+  /**
+   * Handle drop on timeline (for sidebar videos)
+   */
+  const handleTimelineDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOverTimeline(false);
+    setSidebarDropIndicatorIndex(null);
+    
+    if (draggingVideo) {
+      console.log('✅ Sidebar video dropped on timeline:', draggingVideo.filename);
+      addClipToTimeline(draggingVideo);
+    }
+  };
 
   return (
     <div ref={containerRef} style={styles.container}>
       {/* Timeline Header */}
       <div style={styles.header}>
-        <h3 style={styles.title}>Timeline</h3>
-        <div style={styles.controls}>
-          {/* Import Button */}
-          {onImportVideo && (
-            <button
-              style={styles.importButton}
-              onClick={onImportVideo}
-              title="Import Another Video"
-            >
-              ➕ Import Video
-            </button>
-          )}
-          
-          {/* Playback Controls */}
-          <button
-            style={styles.controlButton}
-            onClick={togglePlayback}
-            title={isPlaying ? 'Pause' : 'Play'}
-          >
-            {isPlaying ? '⏸️' : '▶️'}
+        {/* Left: Toolbar Buttons */}
+        <div style={styles.toolbarLeft}>
+          <button style={styles.toolButton} title="Selection Tool (V)">
+            ⬆️
           </button>
-          <button
-            style={styles.controlButton}
-            onClick={() => setCurrentTime(0)}
-            title="Reset to start"
-          >
-            ⏮️
-          </button>
-
-          {/* Split Button */}
-          <button
-            style={{
-              ...styles.controlButton,
-              backgroundColor: '#dc3545',
+          <button 
+            style={styles.toolButton} 
+            title="Delete (Del)"
+            onClick={() => {
+              if (selectedClipId) {
+                removeClip(selectedClipId);
+                setSelectedClipId(null);
+              }
             }}
-            onClick={handleSplit}
-            title="Split clip at playhead (✂️)"
           >
-            ✂️ Split
+            🗑️
           </button>
-          
+          <button style={styles.toolButton} title="Undo (Ctrl+Z)">
+            ↩️
+          </button>
+          <button style={styles.toolButton} title="Redo (Ctrl+Y)">
+            ↪️
+          </button>
+          <button 
+            style={styles.toolButton}
+            onClick={handleSplit}
+            title="Split at Playhead (✂️)"
+          >
+            ✂️
+          </button>
+          <button style={styles.toolButton} title="Add Marker">
+            🚩
+          </button>
+          <button style={styles.toolButton} title="Transitions">
+            🎭
+          </button>
+          <button style={styles.toolButton} title="Add Text">
+            📝
+          </button>
+        </div>
+
+        {/* Center: Controls */}
+        <div style={styles.controls}>
           {/* Time Display */}
           <span style={styles.timeDisplay}>
             {formatTime(currentTime)} / {formatTime(totalDuration)}
           </span>
 
-          {/* Zoom Controls */}
+          {/* Zoom Controls with Slider */}
           <div style={styles.zoomControls}>
             <button style={styles.zoomButton} onClick={handleZoomOut} title="Zoom Out">
               🔍−
             </button>
-            <span style={styles.zoomLabel}>{Math.round(zoom)}px/s</span>
+            
+            {/* Zoom Slider */}
+            <div style={styles.zoomSliderContainer}>
+              {showZoomLabel && (
+                <div style={styles.zoomLabelFloat}>
+                  {Math.round(zoom)}px/s
+                </div>
+              )}
+              <input
+                type="range"
+                min="1"
+                max="30"
+                value={zoom}
+                onChange={(e) => {
+                  const newZoom = parseFloat(e.target.value);
+                  if (timelineWrapperRef.current && timelineRef.current) {
+                    zoomTowardsCursor(newZoom);
+                  }
+                  handleZoomChange(newZoom);
+                }}
+                style={styles.zoomSlider}
+              />
+            </div>
+            
             <button style={styles.zoomButton} onClick={handleZoomIn} title="Zoom In">
               🔍+
             </button>
           </div>
+        </div>
+
+        {/* Right: View Options */}
+        <div style={styles.toolbarRight}>
+          <button 
+            style={styles.toolButton} 
+            title="Fullscreen (F11)"
+            onClick={onFullscreen}
+          >
+            ⛶
+          </button>
+          <button 
+            style={styles.toolButton} 
+            title="Hide Timeline"
+            onClick={onToggleCollapse}
+          >
+            👁️
+          </button>
         </div>
       </div>
 
@@ -279,12 +569,12 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
       <div 
         ref={timelineWrapperRef}
         style={{
-          width: '100vw', // 100% of viewport width
-          maxWidth: '100vw', // Never exceed viewport
+          width: '100%', // 100% of parent container
+          maxWidth: '100%', // Never exceed parent
           height: '180px',
           overflowX: 'auto',
           overflowY: 'hidden',
-          backgroundColor: '#f8f9fa',
+          backgroundColor: '#1a1a1a',
           position: 'relative' as const,
         }}
       >
@@ -293,12 +583,17 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
           ref={timelineRef}
           style={{
             ...styles.timelineCanvas,
-            // Width: at least wrapper width, max 5x wrapper width for reasonable scrolling
-            width: `${Math.max(
-              window.innerWidth,
-              Math.min(totalDuration * zoom + 100, window.innerWidth * 5)
-            )}px`,
+            // Width: use wrapper width if available, otherwise use timeline duration
+            width: timelineWrapperRef.current 
+              ? `${Math.max(
+                  timelineWrapperRef.current.clientWidth,
+                  Math.min(totalDuration * zoom + 100, timelineWrapperRef.current.clientWidth * 5)
+                )}px`
+              : `${totalDuration * zoom + 100}px`,
           }}
+          onDragOver={handleTimelineDragOver}
+          onDragLeave={handleTimelineDragLeave}
+          onDrop={handleTimelineDrop}
         >
         {/* Time Ruler */}
         <div style={styles.ruler} onClick={handleTimelineClick}>
@@ -322,6 +617,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
               const clipWidth = clip.duration * zoom;
               const clipLeft = clip.startTime * zoom + TIMELINE_LEFT_OFFSET;
               const isSelected = selectedClipId === clip.id;
+              const isDragging = draggingClipId === clip.id;
 
               return (
                 <div
@@ -331,14 +627,44 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
                     left: `${clipLeft}px`,
                     width: `${clipWidth}px`,
                     ...(isSelected ? styles.clipSelected : {}),
+                    ...(isDragging ? styles.clipDragging : {}),
+                    cursor: isDragging ? 'grabbing' : 'grab',
                   }}
                   title={clip.metadata.filename}
+                  onMouseDown={(e) => handleClipDragStart(e, clip.id)}
                   onClick={(e) => {
                     e.stopPropagation(); // Prevent ruler click
                     setSelectedClipId(clip.id);
                   }}
                 >
-                  {/* Clip Content */}
+                  {/* Thumbnail Sequence */}
+                  {clip.thumbnails && clip.thumbnails.length > 0 && (
+                    <div style={styles.thumbnailSequence}>
+                      {clip.thumbnails.map((thumbnail, thumbIndex) => {
+                        const thumbWidth = 120; // Fixed width for each thumbnail
+                        const thumbLeft = thumbIndex * thumbWidth;
+                        
+                        // Only render if thumbnail is within clip bounds
+                        if (thumbLeft < clipWidth) {
+                          return (
+                            <img
+                              key={thumbIndex}
+                              src={thumbnail}
+                              alt=""
+                              style={{
+                                ...styles.thumbnailImage,
+                                left: `${thumbLeft}px`,
+                                width: `${thumbWidth}px`,
+                              }}
+                            />
+                          );
+                        }
+                        return null;
+                      })}
+                    </div>
+                  )}
+
+                  {/* Clip Content Overlay */}
                   <div style={styles.clipHeader}>
                     <span style={styles.clipName}>{clip.metadata.filename}</span>
                     <button
@@ -373,6 +699,58 @@ export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
           <div style={styles.playheadHandle} />
           <div style={styles.playheadLine} onMouseDown={handlePlayheadMouseDown} />
         </div>
+
+        {/* Drop Indicator Triangle (for clip reorder) */}
+        {dropIndicatorIndex !== null && (
+          <div
+            style={{
+              ...styles.dropIndicator,
+              left: dropIndicatorIndex === 0
+                ? `${TIMELINE_LEFT_OFFSET}px`
+                : `${(clips.slice(0, dropIndicatorIndex).reduce((sum, c) => sum + c.duration, 0) * zoom) + TIMELINE_LEFT_OFFSET}px`,
+            }}
+          >
+            <div style={styles.dropIndicatorTriangle} />
+            <div style={styles.dropIndicatorLine} />
+          </div>
+        )}
+        
+        {/* Drop Indicator for Sidebar Videos */}
+        {sidebarDropIndicatorIndex !== null && draggingVideo && (
+          <div
+            style={{
+              ...styles.dropIndicator,
+              left: sidebarDropIndicatorIndex === 0
+                ? `${TIMELINE_LEFT_OFFSET}px`
+                : `${(clips.slice(0, sidebarDropIndicatorIndex).reduce((sum, c) => sum + c.duration, 0) * zoom) + TIMELINE_LEFT_OFFSET}px`,
+            }}
+          >
+            <div style={styles.dropIndicatorTriangle} />
+            <div style={styles.dropIndicatorLine} />
+          </div>
+        )}
+
+        {/* Ghost Clip */}
+        {draggingClipId && ghostPosition && (() => {
+          const draggingClip = clips.find(c => c.id === draggingClipId);
+          return draggingClip && (
+            <div
+              style={{
+                ...styles.ghostClip,
+                left: `${ghostPosition.x - 40}px`,
+                top: `${ghostPosition.y - 40}px`,
+                width: `${draggingClip.duration * zoom}px`,
+              }}
+            >
+              <div style={styles.clipHeader}>
+                <span style={styles.clipName}>{draggingClip.metadata.filename}</span>
+              </div>
+              <div style={styles.clipInfo}>
+                {formatTime(draggingClip.duration)}
+              </div>
+            </div>
+          );
+        })()}
       </div> {/* Close timelineCanvas */}
       </div> {/* Close wrapper */}
     </div>
@@ -397,9 +775,34 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '15px 15px',
+    padding: '10px 15px',
     backgroundColor: '#2a2a2a',
     borderBottom: '1px solid #444',
+  },
+  toolbarLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  toolbarRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  toolButton: {
+    backgroundColor: '#3a3a3a',
+    color: 'white',
+    border: '1px solid #555',
+    padding: '8px 12px',
+    fontSize: '18px',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '40px',
+    height: '40px',
   },
   title: {
     margin: 0,
@@ -443,8 +846,34 @@ const styles = {
   zoomControls: {
     display: 'flex',
     alignItems: 'center',
-    gap: '5px',
+    gap: '10px',
     marginLeft: '10px',
+  },
+  zoomSliderContainer: {
+    position: 'relative' as const,
+    display: 'flex',
+    alignItems: 'center',
+  },
+  zoomSlider: {
+    width: '150px',
+    height: '4px',
+    cursor: 'pointer',
+    accentColor: '#667eea',
+  },
+  zoomLabelFloat: {
+    position: 'absolute' as const,
+    top: '-30px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    color: 'white',
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontWeight: 'bold' as const,
+    whiteSpace: 'nowrap' as const,
+    pointerEvents: 'none' as const,
+    zIndex: 1000,
   },
   zoomButton: {
     backgroundColor: '#3a3a3a',
@@ -511,14 +940,37 @@ const styles = {
     background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
     borderRadius: '6px',
     border: '2px solid #5a67d8',
-    padding: '8px',
+    padding: '0', // Remove padding to fit thumbnails
     cursor: 'grab',
     transition: 'all 0.2s ease',
     overflow: 'hidden',
   },
+  thumbnailSequence: {
+    position: 'absolute' as const,
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    overflow: 'hidden',
+  },
+  thumbnailImage: {
+    position: 'absolute' as const,
+    top: 0,
+    height: '100%',
+    objectFit: 'cover' as const,
+    pointerEvents: 'none' as const,
+    opacity: 0.7,
+  },
   clipSelected: {
     border: '3px solid #fbbf24',
     boxShadow: '0 0 12px rgba(251, 191, 36, 0.5)',
+  },
+  clipDragging: {
+    opacity: 0.6,
+    cursor: 'grabbing',
+    boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+    zIndex: 10,
   },
   trimHandle: {
     position: 'absolute' as const,
@@ -562,10 +1014,13 @@ const styles = {
     opacity: 0.9,
   },
   clipHeader: {
+    position: 'relative' as const,
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: '5px',
+    padding: '6px 8px',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    zIndex: 2,
   },
   clipName: {
     color: 'white',
@@ -575,9 +1030,10 @@ const styles = {
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap' as const,
     maxWidth: '80%',
+    textShadow: '0 1px 2px rgba(0, 0, 0, 0.8)',
   },
   removeButton: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.3)',
     color: 'white',
     border: 'none',
     borderRadius: '50%',
@@ -588,11 +1044,20 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 3,
   },
   clipInfo: {
-    color: 'rgba(255,255,255,0.9)',
+    position: 'absolute' as const,
+    bottom: '6px',
+    left: '8px',
+    color: 'white',
     fontSize: '11px',
-    fontWeight: '500' as const,
+    fontWeight: 'bold' as const,
+    padding: '2px 6px',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    borderRadius: '4px',
+    zIndex: 2,
+    textShadow: '0 1px 2px rgba(0, 0, 0, 0.8)',
   },
   playhead: {
     position: 'absolute' as const,
@@ -620,6 +1085,44 @@ const styles = {
     marginLeft: '-1px',
     cursor: 'grab',
     pointerEvents: 'auto' as const,
+  },
+  
+  // Drop indicator styles
+  dropIndicator: {
+    position: 'absolute' as const,
+    top: '30px',
+    bottom: 0,
+    zIndex: 15,
+    pointerEvents: 'none' as const,
+  },
+  dropIndicatorTriangle: {
+    width: 0,
+    height: 0,
+    borderLeft: '8px solid transparent',
+    borderRight: '8px solid transparent',
+    borderTop: '12px solid #667eea',
+    marginLeft: '-8px',
+  },
+  dropIndicatorLine: {
+    width: '3px',
+    height: '100%',
+    backgroundColor: '#667eea',
+    marginLeft: '-1.5px',
+  },
+  
+  // Ghost clip styles
+  ghostClip: {
+    position: 'fixed' as const,
+    height: '80px',
+    backgroundColor: 'rgba(102, 126, 234, 0.5)',
+    background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.5) 0%, rgba(118, 75, 162, 0.5) 100%)',
+    borderRadius: '6px',
+    border: '2px dashed rgba(255, 255, 255, 0.5)',
+    padding: '8px',
+    cursor: 'grabbing',
+    overflow: 'hidden',
+    zIndex: 1000,
+    pointerEvents: 'none' as const,
   },
 };
 

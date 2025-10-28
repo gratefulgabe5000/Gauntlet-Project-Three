@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron';
-import { testFFmpeg, extractVideoMetadata } from './main/ffmpeg';
+import { testFFmpeg, testFFprobe, getFFmpegVersion, extractVideoMetadata, generateThumbnail, generateThumbnails } from './main/ffmpeg';
 import { APP_CONFIG } from './shared/constants';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -64,16 +64,63 @@ ipcMain.handle('extract-metadata', async (_event, filePath: string) => {
   }
 });
 
+ipcMain.handle('generate-thumbnail', async (_event, filePath: string, timeInSeconds: number = 0) => {
+  console.log('🖼️ IPC: generate-thumbnail called for:', filePath, 'at', timeInSeconds);
+  try {
+    const thumbnail = await generateThumbnail(filePath, timeInSeconds, 160);
+    console.log('🖼️ IPC: Thumbnail generated successfully');
+    return thumbnail;
+  } catch (error) {
+    console.error('🖼️ IPC: Thumbnail generation failed:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('generate-thumbnails', async (_event, filePath: string, count: number, duration: number) => {
+  console.log('🖼️ IPC: generate-thumbnails called for:', filePath, 'count:', count);
+  try {
+    const thumbnails = await generateThumbnails(filePath, count, duration, 120);
+    console.log('🖼️ IPC: Thumbnails generated successfully');
+    return thumbnails;
+  } catch (error) {
+    console.error('🖼️ IPC: Thumbnails generation failed:', error);
+    throw error;
+  }
+});
+
 console.log('✅ IPC handlers registered successfully');
+
+let splashWindow: BrowserWindow | null = null;
+let mainWindow: BrowserWindow | null = null;
+
+const createSplashWindow = (): void => {
+  splashWindow = new BrowserWindow({
+    width: 600,
+    height: 400,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  splashWindow.loadFile(path.join(__dirname, '../src/splash.html'));
+  splashWindow.center();
+};
 
 const createWindow = (): void => {
   // Create the browser window.
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     title: APP_CONFIG.name,
     height: 800,
     width: 1400,
     minWidth: 1200,
     minHeight: 700,
+    show: false, // Don't show until ready
     webPreferences: {
       preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
       nodeIntegration: false,
@@ -85,6 +132,20 @@ const createWindow = (): void => {
   // and load the index.html of the app.
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
 
+  // Show main window and close splash when ready
+  mainWindow.webContents.on('did-finish-load', () => {
+    setTimeout(() => {
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      if (splashWindow) {
+        splashWindow.close();
+        splashWindow = null;
+      }
+    }, 500); // Small delay for smooth transition
+  });
+
   // Open the DevTools in development.
   if (process.env.NODE_ENV !== 'production') {
     mainWindow.webContents.openDevTools();
@@ -92,22 +153,44 @@ const createWindow = (): void => {
 
   // Test FFmpeg on startup
   console.log('🔍 Testing FFmpeg integration...');
+  console.log('==========================================');
+  
+  // Test FFmpeg
   testFFmpeg().then((success) => {
     if (success) {
       console.log('✅ FFmpeg integration verified successfully!');
-      console.log('✅ Video processing ready for MVP development!');
       
-      // Send success message to renderer process
-      mainWindow.webContents.send('ffmpeg-status', { success: true });
+      // Test FFprobe
+      return testFFprobe();
     } else {
-      console.error('❌ FFmpeg integration failed - video operations may not work');
-      console.error('❌ Check FFmpeg installation and PATH');
-      
-      // Send failure message to renderer process
+      console.error('❌ FFmpeg integration failed');
       mainWindow.webContents.send('ffmpeg-status', { success: false });
+      throw new Error('FFmpeg test failed');
     }
+  }).then((ffprobeSuccess) => {
+    if (ffprobeSuccess) {
+      console.log('✅ FFprobe integration verified successfully!');
+      
+      // Get version info
+      return getFFmpegVersion();
+    } else {
+      console.error('❌ FFprobe integration failed');
+      mainWindow.webContents.send('ffmpeg-status', { success: false });
+      throw new Error('FFprobe test failed');
+    }
+  }).then((versionInfo) => {
+    console.log('✅ Version info:', versionInfo);
+    console.log('✅ Video processing ready for export pipeline!');
+    console.log('==========================================');
+    
+    // Send success message to renderer process
+    mainWindow.webContents.send('ffmpeg-status', { 
+      success: true,
+      version: versionInfo 
+    });
   }).catch((error) => {
     console.error('❌ FFmpeg test error:', error);
+    console.error('❌ Check FFmpeg installation and PATH');
     mainWindow.webContents.send('ffmpeg-status', { success: false, error: error.message });
   });
 };
@@ -116,6 +199,9 @@ const createWindow = (): void => {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+  // Show splash screen first
+  createSplashWindow();
+  
   // Register custom protocol using stream for better video support
   protocol.registerStreamProtocol('video-local', (request, callback) => {
     // Remove the protocol prefix

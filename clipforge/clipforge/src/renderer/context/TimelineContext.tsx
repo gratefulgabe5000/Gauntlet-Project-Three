@@ -3,7 +3,7 @@
  * Manages timeline state and operations
  */
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { VideoClip, TimelineState, VideoMetadata } from '../../shared/types';
 
 interface TimelineContextType {
@@ -13,6 +13,7 @@ interface TimelineContextType {
   updateClipPosition: (clipId: string, startTime: number) => void;
   updateClipTrim: (clipId: string, trimStart?: number, trimEnd?: number) => void;
   splitClipAtTime: (time: number) => boolean;
+  reorderClips: (clipId: string, newIndex: number) => void;
   setCurrentTime: (time: number) => void;
   setZoom: (zoom: number) => void;
   clearTimeline: () => void;
@@ -53,6 +54,7 @@ export const TimelineProvider: React.FC<TimelineProviderProps> = ({ children }) 
    * Add a video clip to the timeline
    */
   const addClipToTimeline = useCallback((metadata: VideoMetadata) => {
+    // Add clip to timeline immediately WITHOUT thumbnails
     setTimelineState((prev) => {
       // Calculate where to place the clip (at the end of existing clips)
       const startTime = prev.totalDuration;
@@ -63,6 +65,7 @@ export const TimelineProvider: React.FC<TimelineProviderProps> = ({ children }) 
         startTime,
         duration: metadata.duration,
         track: 0, // For MVP, all clips go on track 0
+        thumbnails: undefined, // Start without thumbnails
       };
 
       const newTotalDuration = startTime + metadata.duration;
@@ -85,6 +88,33 @@ export const TimelineProvider: React.FC<TimelineProviderProps> = ({ children }) 
         autoZoom: newZoom,
         userHasAdjustedZoom,
       });
+
+      // Generate thumbnails asynchronously AFTER adding to timeline
+      const clipId = newClip.id;
+      setTimeout(async () => {
+        try {
+          console.log(`🖼️ Starting async thumbnail generation for clip: ${clipId}`);
+          // Calculate how many thumbnails we need based on duration
+          // Aim for one thumbnail every ~1-2 seconds
+          const thumbnailCount = Math.min(Math.ceil(metadata.duration / 1.5), 50); // Cap at 50
+          const thumbnails = await window.electron?.generateThumbnails(
+            metadata.path,
+            thumbnailCount,
+            metadata.duration
+          ) || [];
+          console.log(`✅ Generated ${thumbnails.length} thumbnails for clip ${clipId}`);
+          
+          // Update the clip with thumbnails
+          setTimelineState((currentState) => ({
+            ...currentState,
+            clips: currentState.clips.map((clip) =>
+              clip.id === clipId ? { ...clip, thumbnails } : clip
+            ),
+          }));
+        } catch (error) {
+          console.error('⚠️ Failed to generate thumbnails for timeline:', error);
+        }
+      }, 100); // Small delay to let UI update first
 
       return {
         ...prev,
@@ -281,6 +311,52 @@ export const TimelineProvider: React.FC<TimelineProviderProps> = ({ children }) 
   }, []);
 
   /**
+   * Reorder clips on the timeline
+   * Moves clip to new index position and recalculates all start times
+   */
+  const reorderClips = useCallback((clipId: string, newIndex: number) => {
+    setTimelineState((prev) => {
+      const clipIndex = prev.clips.findIndex((c) => c.id === clipId);
+      if (clipIndex === -1) return prev;
+
+      // Create a new clips array with the clip moved to new position
+      const newClips = [...prev.clips];
+      const [movedClip] = newClips.splice(clipIndex, 1);
+      newClips.splice(newIndex, 0, movedClip);
+
+      // Recalculate start times for all clips (sequential placement)
+      let currentTime = 0;
+      const reorderedClips = newClips.map((clip) => {
+        const updatedClip = {
+          ...clip,
+          startTime: currentTime,
+        };
+        currentTime += clip.duration;
+        return updatedClip;
+      });
+
+      // Recalculate total duration
+      const newTotalDuration = reorderedClips.reduce(
+        (max, clip) => Math.max(max, clip.startTime + clip.duration),
+        0
+      );
+
+      console.log('🔄 Reordered clips:', {
+        clipId,
+        oldIndex: clipIndex,
+        newIndex,
+        totalDuration: newTotalDuration,
+      });
+
+      return {
+        ...prev,
+        clips: reorderedClips,
+        totalDuration: newTotalDuration,
+      };
+    });
+  }, []);
+
+  /**
    * Set playhead position
    */
   const setCurrentTime = useCallback((time: number) => {
@@ -315,6 +391,69 @@ export const TimelineProvider: React.FC<TimelineProviderProps> = ({ children }) 
     console.log('🧹 Timeline cleared');
   }, []);
 
+  // Store state history for undo/redo
+  const stateHistoryRef = useRef<TimelineState[]>([]);
+  const historyIndexRef = useRef(-1);
+
+  /**
+   * Save current state snapshot for undo
+   */
+  const saveStateSnapshot = useCallback(() => {
+    stateHistoryRef.current = [
+      ...stateHistoryRef.current.slice(0, historyIndexRef.current + 1),
+      JSON.parse(JSON.stringify(timelineState)), // Deep copy
+    ];
+    historyIndexRef.current++;
+    
+    // Limit history to 50 entries
+    if (stateHistoryRef.current.length > 50) {
+      stateHistoryRef.current.shift();
+      historyIndexRef.current--;
+    }
+    
+    console.log('📸 State snapshot saved, history length:', stateHistoryRef.current.length);
+  }, [timelineState]);
+
+  /**
+   * Listen for undo/redo events
+   */
+  useEffect(() => {
+    const handleUndo = () => {
+      if (historyIndexRef.current > 0) {
+        historyIndexRef.current--;
+        const previousState = stateHistoryRef.current[historyIndexRef.current];
+        setTimelineState(previousState);
+        console.log('↩️ Undo applied, history index:', historyIndexRef.current);
+      }
+    };
+
+    const handleRedo = () => {
+      if (historyIndexRef.current < stateHistoryRef.current.length - 1) {
+        historyIndexRef.current++;
+        const nextState = stateHistoryRef.current[historyIndexRef.current];
+        setTimelineState(nextState);
+        console.log('↪️ Redo applied, history index:', historyIndexRef.current);
+      }
+    };
+
+    window.addEventListener('undo-action' as any, handleUndo);
+    window.addEventListener('redo-action' as any, handleRedo);
+
+    return () => {
+      window.removeEventListener('undo-action' as any, handleUndo);
+      window.removeEventListener('redo-action' as any, handleRedo);
+    };
+  }, []);
+
+  /**
+   * Save state snapshot whenever clips change
+   */
+  useEffect(() => {
+    if (timelineState.clips.length > 0) {
+      saveStateSnapshot();
+    }
+  }, [timelineState.clips.length, saveStateSnapshot]);
+
   const value: TimelineContextType = {
     timelineState,
     addClipToTimeline,
@@ -322,6 +461,7 @@ export const TimelineProvider: React.FC<TimelineProviderProps> = ({ children }) 
     updateClipPosition,
     updateClipTrim,
     splitClipAtTime,
+    reorderClips,
     setCurrentTime,
     setZoom,
     clearTimeline,

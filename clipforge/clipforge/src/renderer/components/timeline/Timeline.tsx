@@ -9,14 +9,21 @@ import { useTimeline } from '../../context/TimelineContext';
 // Timeline left offset for visual alignment
 const TIMELINE_LEFT_OFFSET = 20;
 
-export const Timeline: React.FC = () => {
+interface TimelineProps {
+  onImportVideo?: () => void;
+}
+
+export const Timeline: React.FC<TimelineProps> = ({ onImportVideo }) => {
   const { timelineState, setCurrentTime, setZoom, removeClip, splitClipAtTime } = useTimeline();
   const { clips, totalDuration, currentTime, zoom } = timelineState;
   
   const timelineRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const timelineWrapperRef = useRef<HTMLDivElement>(null); // For scroll position
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [mouseTimelineX, setMouseTimelineX] = useState<number | null>(null); // Track mouse X for zoom
 
   /**
    * Format time in MM:SS format
@@ -28,23 +35,12 @@ export const Timeline: React.FC = () => {
   };
 
   /**
-   * Handle playback (simple timer-based for MVP)
+   * Handle playback (simple timer-based for MVP) - DISABLED
    */
   useEffect(() => {
-    if (!isPlaying) return;
-
-    const interval = setInterval(() => {
-      const newTime = currentTime + 0.1;
-      
-      if (newTime >= totalDuration) {
-        setIsPlaying(false);
-        setCurrentTime(0); // Loop back to start
-      } else {
-        setCurrentTime(newTime);
-      }
-    }, 100);
-
-    return () => clearInterval(interval);
+    // Disabled - VideoPlayer now handles playback
+    // Timeline only manages playhead position for scrubbing
+    return;
   }, [isPlaying, totalDuration, currentTime, setCurrentTime]);
 
   /**
@@ -98,20 +94,61 @@ export const Timeline: React.FC = () => {
   }, [isDraggingPlayhead, zoom, totalDuration, setCurrentTime]);
 
   /**
-   * Toggle playback
+   * Toggle playback - DISABLED: VideoPlayer handles playback now
    */
   const togglePlayback = () => {
-    if (currentTime >= totalDuration) {
-      setCurrentTime(0);
-    }
-    setIsPlaying((prev) => !prev);
+    // Disabled - use VideoPlayer controls instead
+    console.log('⚠️ Timeline playback disabled - use VideoPlayer controls');
   };
 
   /**
-   * Handle zoom controls (finer increments: ±1 px/sec)
+   * Handle zoom controls with cursor-based centering
    */
-  const handleZoomIn = () => setZoom(zoom + 1);
-  const handleZoomOut = () => setZoom(zoom - 1);
+  const handleZoomIn = () => {
+    if (!timelineWrapperRef.current || !timelineRef.current) {
+      setZoom(zoom + 1);
+      return;
+    }
+
+    zoomTowardsCursor(zoom + 1);
+  };
+
+  const handleZoomOut = () => {
+    if (!timelineWrapperRef.current || !timelineRef.current) {
+      setZoom(zoom - 1);
+      return;
+    }
+
+    zoomTowardsCursor(zoom - 1);
+  };
+
+  /**
+   * Zoom towards cursor position (or center if no mouse position tracked)
+   */
+  const zoomTowardsCursor = (newZoom: number) => {
+    if (!timelineWrapperRef.current || !timelineRef.current) return;
+
+    const wrapper = timelineWrapperRef.current;
+    const timeline = timelineRef.current;
+
+    // Get the time at the mouse position (or center if no mouse)
+    const mouseX = mouseTimelineX !== null ? mouseTimelineX : wrapper.scrollLeft + wrapper.clientWidth / 2;
+    const timeAtMouse = (mouseX - TIMELINE_LEFT_OFFSET) / zoom;
+
+    // Apply new zoom
+    setZoom(newZoom);
+
+    // After zoom is applied, calculate new position and scroll
+    requestAnimationFrame(() => {
+      const newMouseX = timeAtMouse * newZoom + TIMELINE_LEFT_OFFSET;
+      const targetScrollLeft = mouseX !== null 
+        ? newMouseX - (mouseTimelineX - wrapper.scrollLeft)
+        : newMouseX - wrapper.clientWidth / 2;
+      
+      wrapper.scrollLeft = Math.max(0, targetScrollLeft);
+      console.log('🔍 Zoomed to', newZoom, 'px/sec, centered on time:', timeAtMouse.toFixed(2));
+    });
+  };
 
   /**
    * Handle split at playhead
@@ -129,21 +166,69 @@ export const Timeline: React.FC = () => {
   };
 
   /**
-   * Handle mouse wheel zoom
+   * Handle mouse wheel zoom - only when over timeline
    */
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault(); // Prevent page scroll
+    e.stopPropagation(); // Stop event from bubbling
     
     const zoomDelta = e.deltaY < 0 ? 1 : -1; // Scroll up = zoom in, down = zoom out
     setZoom(zoom + zoomDelta);
   };
 
+  /**
+   * Attach native wheel event listener to prevent default scroll behavior
+   * and zoom towards cursor position
+   */
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      e.preventDefault(); // Block page scroll
+      
+      // Track mouse position for zoom centering
+      if (timelineWrapperRef.current) {
+        const rect = timelineWrapperRef.current.getBoundingClientRect();
+        setMouseTimelineX(e.clientX - rect.left + timelineWrapperRef.current.scrollLeft);
+      }
+      
+      const zoomDelta = e.deltaY < 0 ? 1 : -1;
+      const newZoom = Math.max(0.5, Math.min(zoom + zoomDelta, 30));
+      
+      // Use zoom towards cursor
+      if (timelineWrapperRef.current && timelineRef.current) {
+        zoomTowardsCursor(newZoom);
+      } else {
+        setZoom(newZoom);
+      }
+    };
+
+    // Use native event with { passive: false } to allow preventDefault
+    container.addEventListener('wheel', handleNativeWheel, { passive: false });
+
+    return () => {
+      container.removeEventListener('wheel', handleNativeWheel);
+    };
+  }, [zoom, setZoom]);
+
   return (
-    <div style={styles.container}>
+    <div ref={containerRef} style={styles.container}>
       {/* Timeline Header */}
       <div style={styles.header}>
         <h3 style={styles.title}>Timeline</h3>
         <div style={styles.controls}>
+          {/* Import Button */}
+          {onImportVideo && (
+            <button
+              style={styles.importButton}
+              onClick={onImportVideo}
+              title="Import Another Video"
+            >
+              ➕ Import Video
+            </button>
+          )}
+          
           {/* Playback Controls */}
           <button
             style={styles.controlButton}
@@ -192,6 +277,7 @@ export const Timeline: React.FC = () => {
 
       {/* Timeline Canvas Wrapper - Fixed Width */}
       <div 
+        ref={timelineWrapperRef}
         style={{
           width: '100vw', // 100% of viewport width
           maxWidth: '100vw', // Never exceed viewport
@@ -201,7 +287,6 @@ export const Timeline: React.FC = () => {
           backgroundColor: '#f8f9fa',
           position: 'relative' as const,
         }}
-        onWheel={handleWheel} // Mouse wheel zoom control
       >
         {/* Timeline Canvas - Content */}
         <div
@@ -290,17 +375,6 @@ export const Timeline: React.FC = () => {
         </div>
       </div> {/* Close timelineCanvas */}
       </div> {/* Close wrapper */}
-
-      {/* Timeline Info */}
-      <div style={styles.info}>
-        <p style={styles.infoText}>
-          {clips.length === 0 ? (
-            '📹 Import videos to get started'
-          ) : (
-            `📹 ${clips.length} clip(s) • Total duration: ${formatTime(totalDuration)}`
-          )}
-        </p>
-      </div>
     </div>
   );
 };
@@ -310,37 +384,49 @@ export const Timeline: React.FC = () => {
  */
 const styles = {
   container: {
-    marginTop: '0', // Remove top margin
-    backgroundColor: 'white',
-    borderRadius: '0', // Remove border radius for full width
-    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    backgroundColor: '#2a2a2a',
+    color: '#fff',
+    height: '100%',
+    width: '100%',
+    maxWidth: '100%',
     overflow: 'hidden',
-    width: '100%', // Full window width
-    maxWidth: '100%', // Prevent expansion
   },
   header: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '15px 15px', // Match contentWrapper padding (15px)
-    backgroundColor: '#f8f9fa',
-    borderBottom: '2px solid #e9ecef',
+    padding: '15px 15px',
+    backgroundColor: '#2a2a2a',
+    borderBottom: '1px solid #444',
   },
   title: {
     margin: 0,
-    fontSize: '18px',
+    fontSize: '16px',
     fontWeight: 'bold' as const,
-    color: '#333',
+    color: '#fff',
   },
   controls: {
     display: 'flex',
     alignItems: 'center',
     gap: '10px',
   },
-  controlButton: {
-    backgroundColor: '#667eea',
+  importButton: {
+    backgroundColor: '#28a745',
     color: 'white',
     border: 'none',
+    padding: '8px 16px',
+    fontSize: '14px',
+    fontWeight: 'bold' as const,
+    borderRadius: '6px',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+  },
+  controlButton: {
+    backgroundColor: '#3a3a3a',
+    color: 'white',
+    border: '1px solid #555',
     padding: '8px 16px',
     fontSize: '16px',
     borderRadius: '6px',
@@ -350,7 +436,7 @@ const styles = {
   timeDisplay: {
     fontSize: '14px',
     fontWeight: 'bold' as const,
-    color: '#333',
+    color: '#aaa',
     padding: '0 15px',
     fontFamily: 'monospace',
   },
@@ -361,9 +447,9 @@ const styles = {
     marginLeft: '10px',
   },
   zoomButton: {
-    backgroundColor: '#6c757d',
+    backgroundColor: '#3a3a3a',
     color: 'white',
-    border: 'none',
+    border: '1px solid #555',
     padding: '6px 12px',
     fontSize: '14px',
     borderRadius: '4px',
@@ -371,42 +457,41 @@ const styles = {
   },
   zoomLabel: {
     fontSize: '12px',
-    color: '#666',
+    color: '#888',
     minWidth: '50px',
     textAlign: 'center' as const,
   },
   timelineWrapper: {
-    width: '100%', // Fixed width - always full screen
-    maxWidth: '100%', // Prevent expansion beyond 100%
+    width: '100%',
+    maxWidth: '100%',
     height: '180px',
-    overflowX: 'auto' as const, // Horizontal scroll
-    overflowY: 'hidden' as const, // No vertical scroll
-    backgroundColor: '#f8f9fa',
+    overflowX: 'auto' as const,
+    overflowY: 'hidden' as const,
+    backgroundColor: '#1a1a1a',
     position: 'relative' as const,
   },
   timelineCanvas: {
     position: 'relative' as const,
     height: '180px',
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#1a1a1a',
     cursor: 'pointer',
-    padding: '0', // No padding - use offset for alignment instead
-    // Width is set dynamically via inline style based on zoom
+    padding: '0',
   },
   ruler: {
     position: 'relative' as const,
     height: '30px',
-    borderBottom: '1px solid #dee2e6',
-    backgroundColor: '#fff',
+    borderBottom: '1px solid #444',
+    backgroundColor: '#2a2a2a',
   },
   rulerMark: {
     position: 'absolute' as const,
     top: 0,
     height: '100%',
-    borderLeft: '1px solid #adb5bd',
+    borderLeft: '1px solid #555',
   },
   rulerLabel: {
     fontSize: '10px',
-    color: '#6c757d',
+    color: '#888',
     marginLeft: '3px',
   },
   tracksContainer: {
@@ -535,16 +620,6 @@ const styles = {
     marginLeft: '-1px',
     cursor: 'grab',
     pointerEvents: 'auto' as const,
-  },
-  info: {
-    padding: '12px 20px',
-    backgroundColor: '#f8f9fa',
-    borderTop: '1px solid #e9ecef',
-  },
-  infoText: {
-    margin: 0,
-    fontSize: '14px',
-    color: '#6c757d',
   },
 };
 
